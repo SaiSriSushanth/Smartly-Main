@@ -185,8 +185,9 @@ The application includes several performance optimizations:
 - **File Type Validation**: Secure file upload handling
 
 ## 🧪 Testing
-
+'''
 Run the test suite:
+'''
 ```bash
 python manage.py test
 ```
