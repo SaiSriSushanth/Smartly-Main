@@ -27,9 +27,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-9mb^wy$r4zyiqe$9@+#3ec7tn^+7t*68_f$1$!lk#pk5)mug)j'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# SECURITY WARNING: don't run with debug turned on in production!
+DEBUG = os.getenv('DEBUG', 'True') == 'True'
 
 ALLOWED_HOSTS = ["*"]
+
+# Render.com uses header to forward protocol
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 
 
 
@@ -93,6 +98,12 @@ DATABASES = {
         'NAME': BASE_DIR / 'db.sqlite3',
     }
 }
+
+# Database configuration for production
+import dj_database_url
+db_from_env = dj_database_url.config(conn_max_age=600)
+DATABASES['default'].update(db_from_env)
+
 
 
 # Password validation
@@ -163,8 +174,17 @@ ALLOW_MODEL_FALLBACKS = bool(os.getenv('ALLOW_MODEL_FALLBACKS', ''))
 
 # Tesseract OCR configuration
 # Prefer environment variables; fall back to standard Windows install paths.
-TESSERACT_CMD = os.getenv('TESSERACT_CMD', r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe")
-TESSDATA_PREFIX = os.getenv('TESSDATA_PREFIX', r"C:\\Program Files\\Tesseract-OCR\\tessdata")
+# Tesseract OCR configuration
+# In production (Docker), tesseract is usually in the path.
+# In local Windows, it might be in Program Files.
+if os.name == 'nt':
+    TESSERACT_CMD = os.getenv('TESSERACT_CMD', r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe")
+    TESSDATA_PREFIX = os.getenv('TESSDATA_PREFIX', r"C:\\Program Files\\Tesseract-OCR\\tessdata")
+else:
+    # Linux/Docker default
+    TESSERACT_CMD = os.getenv('TESSERACT_CMD', 'tesseract')
+    TESSDATA_PREFIX = os.getenv('TESSDATA_PREFIX', '/usr/share/tesseract-ocr/4.00/tessdata')
+
 
 # Celery Configuration
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
