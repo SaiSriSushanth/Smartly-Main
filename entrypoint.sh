@@ -7,5 +7,6 @@ python manage.py migrate
 if [ "$#" -gt 0 ]; then
     exec "$@"
 else
-    exec gunicorn --bind 0.0.0.0:8000 smartly.wsgi:application
+    exec gunicorn --bind 0.0.0.0:${PORT:-8000} smartly.wsgi:application
 fi
+
