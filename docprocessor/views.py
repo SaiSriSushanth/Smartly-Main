@@ -272,9 +272,15 @@ def check_processing_status(request, document_id):
     from celery.result import AsyncResult
     result = AsyncResult(task_id)
     
+    # Debug logging
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Checking status for task {task_id}: State={result.state}")
+    
     if result.state == 'SUCCESS':
         # Result is the ProcessedResult ID
         processed_result_id = result.result
+        logger.info(f"Task {task_id} SUCCESS. Result ID: {processed_result_id}")
         if processed_result_id:
             target_url = reverse('document_result', args=[processed_result_id])
             response = HttpResponse(status=200)
@@ -282,6 +288,7 @@ def check_processing_status(request, document_id):
             return response
     elif result.state == 'FAILURE':
         # Handle failure (maybe redirect to dashboard with error)
+        logger.error(f"Task {task_id} FAILED. Result: {result.result}")
         target_url = reverse('dashboard')
         messages.error(request, f"Processing failed: {result.result}")
         response = HttpResponse(status=200)
