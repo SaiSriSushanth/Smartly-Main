@@ -1,10 +1,78 @@
+import os
+import re
+import json
+import logging
+from urllib.parse import quote, unquote, urlparse, parse_qs, urlencode
+import urllib.request as urlrequest
+from urllib.error import HTTPError, URLError
+from django.conf import settings
+from youtube_transcript_api import YouTubeTranscriptApi
+
+# Initialize keys
+OPENAI_KEY = getattr(settings, 'OPENAI_API_KEY', None) or os.environ.get('OPENAI_API_KEY')
+ANTH_KEY = getattr(settings, 'ANTHROPIC_API_KEY', None) or os.environ.get('ANTHROPIC_API_KEY')
+GOOGLE_KEY = getattr(settings, 'GOOGLE_API_KEY', None) or os.environ.get('GOOGLE_API_KEY')
+HF_KEY = getattr(settings, 'HUGGINGFACE_API_KEY', None) or os.environ.get('HUGGINGFACE_API_KEY')
+
+ALLOW_FALLBACKS = True
+
+def extract_text_from_pdf(file_path):
+    """Extract text from PDF using PyPDF2 (Lazy Loaded)."""
+    try:
+        import PyPDF2
+        with open(file_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+            return text
+    except ImportError:
+        return "Error: PyPDF2 not installed."
+    except Exception as e:
+        return f"Error extracting PDF: {str(e)}"
+
+def extract_text_from_docx(file_path):
+    """Extract text from DOCX using python-docx (Lazy Loaded)."""
+    try:
+        import docx
+        doc = docx.Document(file_path)
+        return "\n".join([para.text for para in doc.paragraphs])
+    except ImportError:
+        return "Error: python-docx not installed."
+    except Exception as e:
+        return f"Error extracting DOCX: {str(e)}"
+
+def extract_text_from_image(file_path):
+    """Extract text from Image using Tesseract (Lazy Loaded)."""
+    try:
+        import pytesseract
+        from PIL import Image
+        
+        # Configure Tesseract path if needed
+        tesseract_cmd = os.environ.get('TESSERACT_CMD') or getattr(settings, 'TESSERACT_CMD', None)
+        if tesseract_cmd:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+            
+        return pytesseract.image_to_string(Image.open(file_path))
+    except ImportError:
+        return "Error: pytesseract or Pillow not installed."
+    except Exception as e:
+        return f"Error extracting Image: {str(e)}"
+
+def extract_text_from_file(file_path, file_type):
+    """Extract text from a file based on its type."""
+    if file_type == 'pdf':
+        return extract_text_from_pdf(file_path)
     elif file_type == 'docx':
         return extract_text_from_docx(file_path)
     elif file_type == 'image':
         return extract_text_from_image(file_path)
     elif file_type == 'txt':
-        with open(file_path, 'r', encoding='utf-8') as file:
-            return file.read()
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                return file.read()
+        except Exception as e:
+            return f"Error reading text file: {str(e)}"
     else:
         return "Unsupported file type"
 
@@ -30,6 +98,12 @@ def _route_chat(messages, system_prompt=None, model="gpt-3.5-turbo", max_tokens=
     """Route chat to the appropriate provider based on model string.
     Resolve API keys at call time to avoid import-order issues.
     """
+    # Lazy load OpenAI client
+    import openai
+    openai_client = None
+    if OPENAI_KEY:
+        openai_client = openai.OpenAI(api_key=OPENAI_KEY)
+
     def _strip_think_blocks(text):
         try:
             if not isinstance(text, str):
@@ -38,340 +112,42 @@ def _route_chat(messages, system_prompt=None, model="gpt-3.5-turbo", max_tokens=
             stripped = re.sub(r"<\s*think\b[^>]*>[\s\S]*?<\s*/\s*think\s*>", "", text, flags=re.IGNORECASE)
             if stripped.strip():
                 return stripped
-            (msg.get('content') or '').strip()
-            for msg in (messages or []) if msg.get('role') == 'system'
-        ]
-        effective_system = (system_prompt or '').strip()
-        if sys_msgs:
-            extra = "\n\n".join([s for s in sys_msgs if s])
-            effective_system = (effective_system + ("\n\n" + extra if effective_system else extra)).strip()
-        # Use only the latest user message for single-turn providers to reduce drift
-        last_user_msg = ''
-        for msg in reversed(messages or []):
-            if msg.get('role') == 'user':
-                last_user_msg = (msg.get('content') or '').strip()
-                break
-        if m.startswith("claude") or m.startswith("anthropic"):
-            if Anthropic is None or not ANTH_KEY:
-                logging.getLogger(__name__).warning(
-                    f"Anthropic not configured: import={'ok' if Anthropic else 'missing'}, key_present={bool(ANTH_KEY)}"
-                )
-                if not ALLOW_FALLBACKS:
-                    return f"Provider not configured for model '{model}'. Set ANTHROPIC_API_KEY to use this model.\n\n[model: {model}]"
-                # Provider not configured: fall back to OpenAI only if allowed
-                final_messages = []
-                if system_prompt:
-                    final_messages.append({"role": "system", "content": system_prompt})
-                final_messages.extend(messages)
-                if not openai_client:
-                     return "OpenAI client not initialized."
-                response = openai_client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=final_messages,
-                    max_tokens=max_tokens,
-                    temperature=0.3,
-                )
-                return (response.choices[0].message.content or "") + "\n\n[model: gpt-3.5-turbo]"
-            client = Anthropic(api_key=ANTH_KEY)
-            # Anthropic: pass effective system instruction and latest user turn
-            user_content = [{"type": "text", "text": last_user_msg or ''}]
-            try:
-                resp = client.messages.create(
-                    model=model,
-                    max_tokens=max_tokens,
-                    system=effective_system or None,
-                    messages=[{"role": "user", "content": user_content}]
-                )
-            except Exception as e:
-                logging.getLogger(__name__).exception(f"Anthropic call failed for model='{model}': {e}")
-                return f"Error calling Anthropic model '{model}'.\n\n[model: {model}]"
-            out = []
-            for p in getattr(resp, 'content', []):
-                try:
-                    if getattr(p, 'type', '') == 'text':
-                        out.append(p.text)
-                except Exception:
-                    pass
-            logging.getLogger(__name__).debug(
-                f"Anthropic success: model='{model}', tokens={max_tokens}, reply_len={len(''.join(out))}"
-            )
-            return (("".join(out) or "") + f"\n\n[model: {model}]")
-        elif m.startswith("gemini") or m.startswith("google"):
-            if genai is None or not GOOGLE_KEY:
-                logging.getLogger(__name__).warning(
-                    f"Gemini not configured: import={'ok' if genai else 'missing'}, key_present={bool(GOOGLE_KEY)}"
-                )
-                # Provider not configured: gracefully fall back to OpenAI
-                final_messages = []
-                if system_prompt:
-                    final_messages.append({"role": "system", "content": system_prompt})
-                final_messages.extend(messages)
-                if not openai_client:
-                     return "OpenAI client not initialized."
-                response = openai_client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=final_messages,
-                    max_tokens=max_tokens,
-                    temperature=0.3,
-                )
-                return response.choices[0].message.content
-            genai.configure(api_key=GOOGLE_KEY)
-            # Normalize common aliases to current API names
-            alias = (model or "gemini-2.5-flash").lower()
-            if alias.endswith("-flash-latest"):
-                alias = alias.replace("-flash-latest", "-flash")
-            if alias.endswith("-pro-latest"):
-                alias = alias.replace("-pro-latest", "-pro")
-            # Map legacy 1.5 ids to 2.5 when requested keys don't allow 1.5
-            if alias in ("gemini-1.5-flash", "gemini-1.5-pro"):
-                alias = alias.replace("1.5", "2.5")
-            # Build model client with system instruction
-            mdl = genai.GenerativeModel(alias, system_instruction=effective_system or None)
-            try:
-                # Single-turn with the latest user question; system instruction carries context
-                prompt_in = last_user_msg or ""
-                resp = mdl.generate_content(prompt_in, generation_config={"max_output_tokens": max_tokens})
-                logging.getLogger(__name__).debug(
-                    f"Gemini success: alias='{alias}', reply_len={len(getattr(resp, 'text', '') or '')}"
-                )
-                return ((getattr(resp, 'text', '') or "") + f"\n\n[model: {alias}]")
-            except Exception as e:
-                # If the selected model is unavailable for this key or method,
-                # try alternate Gemini aliases within provider before erroring.
-                logging.getLogger(__name__).warning(
-                    f"Gemini generate_content failed for alias='{alias}': {e}"
-                )
-                try:
-                    available = list(getattr(genai, 'list_models')())
-                    # Prefer matching family (flash/pro) with generateContent support
-                    family = 'flash' if 'flash' in alias else ('pro' if 'pro' in alias else '')
-                    fallback_name = None
-                    for mdef in available:
-                        name = getattr(mdef, 'name', '')
-                        methods = set(getattr(mdef, 'supported_generation_methods', []) or [])
-                        if ('generateContent' in methods) and name.startswith('models/'):
-                            base = name.split('/')[-1]
-                            if family and family in base:
-                                fallback_name = base
-                                break
-                            if not fallback_name:
-                                fallback_name = base
-                    if fallback_name:
-                        mdl2 = genai.GenerativeModel(fallback_name, system_instruction=effective_system or None)
-                        resp2 = mdl2.generate_content(prompt_in, generation_config={"max_output_tokens": max_tokens})
-                        logging.getLogger(__name__).debug(
-                            f"Gemini fallback success: picked='{fallback_name}', reply_len={len(getattr(resp2, 'text', '') or '')}"
-                        )
-                        out = getattr(resp2, 'text', '') or ""
-                        out = _strip_think_blocks(out)
-                        return (out + f"\n\n[model: {fallback_name}]")
-                except Exception:
-                    logging.getLogger(__name__).error(
-                        f"Gemini fallback resolution failed for alias='{alias}'"
-                    )
-                    return f"Selected model '{alias}' is unavailable for the current API key or method.\n\n[model: {alias}]"
-        elif ('/' in (model or '')) or m.startswith('hf') or ('huggingface' in m):
-            # Hugging Face Inference API
-            if InferenceClient is None or not HF_KEY:
-                logging.getLogger(__name__).warning(
-                    f"HuggingFace not configured: import={'ok' if InferenceClient else 'missing'}, key_present={bool(HF_KEY)}"
-                )
-                if not ALLOW_FALLBACKS:
-                    return f"Provider not configured for Hugging Face model '{model}'. Set HUGGINGFACE_API_KEY to use this model.\n\n[model: {model}]"
-                # Provider not configured: fallback to OpenAI only if allowed
-                final_messages = []
-                if effective_system:
-                    final_messages.append({"role": "system", "content": effective_system})
-                final_messages.extend(messages)
-                if not openai_client:
-                     return "OpenAI client not initialized."
-                response = openai_client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=final_messages,
-                    max_tokens=max_tokens,
-                    temperature=0.3,
-                )
-                return (response.choices[0].message.content or "") + "\n\n[model: gpt-3.5-turbo]"
-            # Build chat messages for OpenAI-compatible chat completions
-            final_messages = []
-            if effective_system:
-                final_messages.append({"role": "system", "content": effective_system})
-            final_messages.extend(messages)
-            try:
-                # Normalize model/provider for Inference Providers router
-                raw_model = (model or '').strip()
-                hf_model = raw_model
-                provider = 'hf-inference'
-                # If model is of form "org/repo:suffix", detect provider/policy vs revision
-                if ':' in raw_model and '/' in raw_model:
-                    base, suffix = raw_model.split(':', 1)
-                    low = suffix.strip().lower()
-                    provider_aliases = {
-                        'hf': 'hf-inference',
-                        'hf-inference': 'hf-inference',
-                        'novita': 'novita',
-                        'groq': 'groq',
-                        'together': 'together',
-                        'fireworks': 'fireworks-ai',
-                        'fireworks-ai': 'fireworks-ai',
-                        'fal': 'fal-ai',
-                        'fal-ai': 'fal-ai',
-                        'sambanova': 'sambanova',
-                        'cohere': 'cohere',
-                        'replicate': 'replicate',
-                        'fastest': 'auto',
-                        'cheapest': 'auto',
-                    }
-                    if low in provider_aliases:
-                        provider = provider_aliases[low]
-                        hf_model = base
-                    else:
-                        # Treat suffix as Hub revision when not a known provider/policy
-                        hf_model = f"{base}@{suffix}"
-                # Also support explicit provider via "org/repo@provider"
-                if '@' in hf_model and '/' in hf_model:
-                    base, alias = hf_model.split('@', 1)
-                    hf_model = base
-                    alias = alias.strip().lower()
-                    provider_map = {
-                        'hf': 'hf-inference',
-                        'hf-inference': 'hf-inference',
-                        'novita': 'novita',
-                        'groq': 'groq',
-                        'together': 'together',
-                        'fireworks-ai': 'fireworks-ai',
-                        'fal-ai': 'fal-ai',
-                        'sambanova': 'sambanova',
-                        'cohere': 'cohere',
-                        'replicate': 'replicate',
-                    }
-                    provider = provider_map.get(alias, provider)
-                client = InferenceClient(
-                    provider=provider,
-                    api_key=HF_KEY,
-                )
-                logging.getLogger(__name__).debug(
-                    f"HuggingFace routing: base_model='{hf_model}', provider='{provider}'"
-                )
-                # Call OpenAI-compatible chat completions on the router
-                completion = client.chat.completions.create(
-                    model=hf_model,
-                    messages=final_messages,
-                    max_tokens=max_tokens,
-                    temperature=0.3,
-                )
-                try:
-                    # Log response shape for debugging (truncated)
-                    snap = None
-                    if hasattr(completion, 'model_dump_json'):
-                        snap = completion.model_dump_json()[:600]
-                    elif hasattr(completion, 'dict'):
-                        snap = str(completion.dict())[:600]
-                    else:
-                        snap = str(completion)[:600]
-                    logging.getLogger(__name__).debug(
-                        f"HuggingFace completion snapshot (trunc): {snap}"
-                    )
-                except Exception:
-                    pass
-                # Extract content defensively
-                content = None
-                try:
-                    if completion and getattr(completion, 'choices', None):
-                        choice0 = completion.choices[0]
-                        message = getattr(choice0, 'message', None) or (
-                            choice0.get('message') if isinstance(choice0, dict) else None
-                        )
-                        content = getattr(message, 'content', None) if message is not None else None
-                        if content is None and isinstance(message, dict):
-                            content = message.get('content')
-                        # If content is a list of segments (OpenAI Responses-style), join text parts
-                        if isinstance(content, list):
-                            try:
-                                # Prefer explicit 'output_text' segments when present
-                                has_output = any(isinstance(seg, dict) and seg.get('type') == 'output_text' for seg in content)
-                                segments = []
-                                for seg in content:
-                                    if isinstance(seg, dict):
-                                        if has_output and seg.get('type') != 'output_text':
-                                            continue
-                                        txt = seg.get('text') or seg.get('content') or seg.get('value')
-                                        if isinstance(txt, str) and txt:
-                                            segments.append(txt)
-                                    elif isinstance(seg, str):
-                                        if not has_output and seg:
-                                            segments.append(seg)
-                                content = "\n".join(segments).strip()
-                            except Exception:
-                                # Fall through to other extraction paths
-                                pass
-                        # Fallback: some routers may place text at the choice level
-                        if not content:
-                            content = getattr(choice0, 'text', None) if hasattr(choice0, 'text') else (
-                                choice0.get('text') if isinstance(choice0, dict) else None
-                            )
-                        # Final fallback: attempt to flatten any nested message/content structures
-                        if not content:
-                            try:
-                                as_dict = None
-                                if hasattr(completion, 'model_dump'):
-                                    as_dict = completion.model_dump()
-                                elif hasattr(completion, 'dict'):
-                                    as_dict = completion.dict()
-                                elif isinstance(completion, dict):
-                                    as_dict = completion
-                                if isinstance(as_dict, dict):
-                                    choices = as_dict.get('choices') or []
-                                    if choices:
-                                        m = choices[0].get('message') if isinstance(choices[0], dict) else None
-                                        cont = None
-                                        if isinstance(m, dict):
-                                            cont = m.get('content')
-                                        if isinstance(cont, list):
-                                            parts = []
-                                            for seg in cont:
-                                                txt = None
-                                                if isinstance(seg, dict):
-                                                    txt = seg.get('text') or seg.get('content') or seg.get('value')
-                                                elif isinstance(seg, str):
-                                                    txt = seg
-                                                if isinstance(txt, str) and txt:
-                                                    parts.append(txt)
-                                            content = "\n".join(parts).strip()
-                                        elif isinstance(cont, str):
-                                            content = cont
-                            except Exception:
-                                pass
-                except Exception:
-                    content = None
-                text_out = content or ''
-                text_out = _strip_think_blocks(text_out)
-                logging.getLogger(__name__).debug(
-                    f"HuggingFace success: model='{hf_model}', provider='{provider}', reply_len={len(text_out)}"
-                )
-                return text_out + f"\n\n[model: {hf_model}:{provider}]"
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    f"HuggingFace call failed for model='{model}'"
-                )
-                if not ALLOW_FALLBACKS:
-                    return f"Error calling Hugging Face model '{model}'.\n\n[model: {model}]"
-                # Fallback to OpenAI on error only if allowed
-                final_messages = []
-                if effective_system:
-                    final_messages.append({"role": "system", "content": effective_system})
-                final_messages.extend(messages)
-                if not openai_client:
-                     return "OpenAI client not initialized."
-                response = openai_client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=final_messages,
-                    max_tokens=max_tokens,
-                    temperature=0.3,
-                )
-                return (response.choices[0].message.content or "") + "\n\n[model: gpt-3.5-turbo]"
-        else:
-            # Default OpenAI
+            return text
+        except Exception:
+            return text
+
+    # Extract system messages
+    sys_msgs = [
+        (msg.get('content') or '').strip()
+        for msg in (messages or []) if msg.get('role') == 'system'
+    ]
+    effective_system = (system_prompt or '').strip()
+    if sys_msgs:
+        extra = "\n\n".join([s for s in sys_msgs if s])
+        effective_system = (effective_system + ("\n\n" + extra if effective_system else extra)).strip()
+
+    # Use only the latest user message for single-turn providers to reduce drift
+    last_user_msg = ''
+    for msg in reversed(messages or []):
+        if msg.get('role') == 'user':
+            last_user_msg = (msg.get('content') or '').strip()
+            break
+            
+    m = (model or '').lower()
+    
+    if m.startswith("claude") or m.startswith("anthropic"):
+        try:
+            import anthropic
+        except ImportError:
+            return "Error: Anthropic library not installed."
+
+        if not ANTH_KEY:
+            logging.getLogger(__name__).warning("Anthropic not configured: key missing")
+            if not ALLOW_FALLBACKS:
+                return f"Provider not configured for model '{model}'. Set ANTHROPIC_API_KEY to use this model.\n\n[model: {model}]"
+            # Fallback to OpenAI
+            pass # Will fall through to OpenAI logic if we structure this right, or we duplicate fallback logic.
+                 # For now, let's duplicate the fallback logic for safety as per original code.
             final_messages = []
             if system_prompt:
                 final_messages.append({"role": "system", "content": system_prompt})
@@ -379,16 +155,325 @@ def _route_chat(messages, system_prompt=None, model="gpt-3.5-turbo", max_tokens=
             if not openai_client:
                  return "OpenAI client not initialized."
             response = openai_client.chat.completions.create(
-                model=model or "gpt-3.5-turbo",
+                model="gpt-3.5-turbo",
                 messages=final_messages,
                 max_tokens=max_tokens,
                 temperature=0.3,
             )
-            out = response.choices[0].message.content or ""
-            out = _strip_think_blocks(out)
-            return (out + f"\n\n[model: {model or 'gpt-3.5-turbo'}]")
-    except Exception as e:
-        return f"Error chatting: {str(e)}\n\n[model: {model or 'unknown'}]"
+            return (response.choices[0].message.content or "") + "\n\n[model: gpt-3.5-turbo]"
+
+        client = anthropic.Anthropic(api_key=ANTH_KEY)
+        # Anthropic: pass effective system instruction and latest user turn
+        user_content = [{"type": "text", "text": last_user_msg or ''}]
+        try:
+            resp = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=effective_system or None,
+                messages=[{"role": "user", "content": user_content}]
+            )
+        except Exception as e:
+            logging.getLogger(__name__).exception(f"Anthropic call failed for model='{model}': {e}")
+            return f"Error calling Anthropic model '{model}'.\n\n[model: {model}]"
+        out = []
+        for p in getattr(resp, 'content', []):
+            try:
+                if getattr(p, 'type', '') == 'text':
+                    out.append(p.text)
+            except Exception:
+                pass
+        logging.getLogger(__name__).debug(
+            f"Anthropic success: model='{model}', tokens={max_tokens}, reply_len={len(''.join(out))}"
+        )
+        return (("".join(out) or "") + f"\n\n[model: {model}]")
+
+    elif m.startswith("gemini") or m.startswith("google"):
+        try:
+            import google.generativeai as genai
+        except ImportError:
+            return "Error: Google Generative AI library not installed."
+
+        if not GOOGLE_KEY:
+            logging.getLogger(__name__).warning("Gemini not configured: key missing")
+            # Fallback to OpenAI
+            final_messages = []
+            if system_prompt:
+                final_messages.append({"role": "system", "content": system_prompt})
+            final_messages.extend(messages)
+            if not openai_client:
+                 return "OpenAI client not initialized."
+            response = openai_client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=final_messages,
+                max_tokens=max_tokens,
+                temperature=0.3,
+            )
+            return response.choices[0].message.content
+
+        genai.configure(api_key=GOOGLE_KEY)
+        # Normalize common aliases to current API names
+        alias = (model or "gemini-2.5-flash").lower()
+        if alias.endswith("-flash-latest"):
+            alias = alias.replace("-flash-latest", "-flash")
+        if alias.endswith("-pro-latest"):
+            alias = alias.replace("-pro-latest", "-pro")
+        # Map legacy 1.5 ids to 2.5 when requested keys don't allow 1.5
+        if alias in ("gemini-1.5-flash", "gemini-1.5-pro"):
+            alias = alias.replace("1.5", "2.5")
+        # Build model client with system instruction
+        mdl = genai.GenerativeModel(alias, system_instruction=effective_system or None)
+        try:
+            # Single-turn with the latest user question; system instruction carries context
+            prompt_in = last_user_msg or ""
+            resp = mdl.generate_content(prompt_in, generation_config={"max_output_tokens": max_tokens})
+            logging.getLogger(__name__).debug(
+                f"Gemini success: alias='{alias}', reply_len={len(getattr(resp, 'text', '') or '')}"
+            )
+            return ((getattr(resp, 'text', '') or "") + f"\n\n[model: {alias}]")
+        except Exception as e:
+            # If the selected model is unavailable for this key or method,
+            # try alternate Gemini aliases within provider before erroring.
+            logging.getLogger(__name__).warning(
+                f"Gemini generate_content failed for alias='{alias}': {e}"
+            )
+            try:
+                available = list(getattr(genai, 'list_models')())
+                # Prefer matching family (flash/pro) with generateContent support
+                family = 'flash' if 'flash' in alias else ('pro' if 'pro' in alias else '')
+                fallback_name = None
+                for mdef in available:
+                    name = getattr(mdef, 'name', '')
+                    methods = set(getattr(mdef, 'supported_generation_methods', []) or [])
+                    if ('generateContent' in methods) and name.startswith('models/'):
+                        base = name.split('/')[-1]
+                        if family and family in base:
+                            fallback_name = base
+                            break
+                        if not fallback_name:
+                            fallback_name = base
+                if fallback_name:
+                    mdl2 = genai.GenerativeModel(fallback_name, system_instruction=effective_system or None)
+                    resp2 = mdl2.generate_content(prompt_in, generation_config={"max_output_tokens": max_tokens})
+                    logging.getLogger(__name__).debug(
+                        f"Gemini fallback success: picked='{fallback_name}', reply_len={len(getattr(resp2, 'text', '') or '')}"
+                    )
+                    out = getattr(resp2, 'text', '') or ""
+                    out = _strip_think_blocks(out)
+                    return (out + f"\n\n[model: {fallback_name}]")
+            except Exception:
+                logging.getLogger(__name__).error(
+                    f"Gemini fallback resolution failed for alias='{alias}'"
+                )
+                return f"Selected model '{alias}' is unavailable for the current API key or method.\n\n[model: {alias}]"
+
+    elif ('/' in (model or '')) or m.startswith('hf') or ('huggingface' in m):
+        # Hugging Face Inference API
+        try:
+            from huggingface_hub import InferenceClient
+        except ImportError:
+            return "Error: huggingface_hub library not installed."
+
+        if not HF_KEY:
+            logging.getLogger(__name__).warning("HuggingFace not configured: key missing")
+            if not ALLOW_FALLBACKS:
+                return f"Provider not configured for Hugging Face model '{model}'. Set HUGGINGFACE_API_KEY to use this model.\n\n[model: {model}]"
+            # Fallback to OpenAI
+            final_messages = []
+            if effective_system:
+                final_messages.append({"role": "system", "content": effective_system})
+            final_messages.extend(messages)
+            if not openai_client:
+                 return "OpenAI client not initialized."
+            response = openai_client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=final_messages,
+                max_tokens=max_tokens,
+                temperature=0.3,
+            )
+            return (response.choices[0].message.content or "") + "\n\n[model: gpt-3.5-turbo]"
+
+        # Build chat messages for OpenAI-compatible chat completions
+        final_messages = []
+        if effective_system:
+            final_messages.append({"role": "system", "content": effective_system})
+        final_messages.extend(messages)
+        try:
+            # Normalize model/provider for Inference Providers router
+            raw_model = (model or '').strip()
+            hf_model = raw_model
+            provider = 'hf-inference'
+            # If model is of form "org/repo:suffix", detect provider/policy vs revision
+            if ':' in raw_model and '/' in raw_model:
+                base, suffix = raw_model.split(':', 1)
+                low = suffix.strip().lower()
+                provider_aliases = {
+                    'hf': 'hf-inference',
+                    'hf-inference': 'hf-inference',
+                    'novita': 'novita',
+                    'groq': 'groq',
+                    'together': 'together',
+                    'fireworks': 'fireworks-ai',
+                    'fireworks-ai': 'fireworks-ai',
+                    'fal': 'fal-ai',
+                    'fal-ai': 'fal-ai',
+                    'sambanova': 'sambanova',
+                    'cohere': 'cohere',
+                    'replicate': 'replicate',
+                    'fastest': 'auto',
+                    'cheapest': 'auto',
+                }
+                if low in provider_aliases:
+                    provider = provider_aliases[low]
+                    hf_model = base
+                else:
+                    # Treat suffix as Hub revision when not a known provider/policy
+                    hf_model = f"{base}@{suffix}"
+            # Also support explicit provider via "org/repo@provider"
+            if '@' in hf_model and '/' in hf_model:
+                base, alias = hf_model.split('@', 1)
+                hf_model = base
+                alias = alias.strip().lower()
+                provider_map = {
+                    'hf': 'hf-inference',
+                    'hf-inference': 'hf-inference',
+                    'novita': 'novita',
+                    'groq': 'groq',
+                    'together': 'together',
+                    'fireworks-ai': 'fireworks-ai',
+                    'fal-ai': 'fal-ai',
+                    'sambanova': 'sambanova',
+                    'cohere': 'cohere',
+                    'replicate': 'replicate',
+                }
+                provider = provider_map.get(alias, provider)
+            client = InferenceClient(
+                provider=provider,
+                api_key=HF_KEY,
+            )
+            logging.getLogger(__name__).debug(
+                f"HuggingFace routing: base_model='{hf_model}', provider='{provider}'"
+            )
+            # Call OpenAI-compatible chat completions on the router
+            completion = client.chat.completions.create(
+                model=hf_model,
+                messages=final_messages,
+                max_tokens=max_tokens,
+                temperature=0.3,
+            )
+            # Extract content defensively
+            content = None
+            try:
+                if completion and getattr(completion, 'choices', None):
+                    choice0 = completion.choices[0]
+                    message = getattr(choice0, 'message', None) or (
+                        choice0.get('message') if isinstance(choice0, dict) else None
+                    )
+                    content = getattr(message, 'content', None) if message is not None else None
+                    if content is None and isinstance(message, dict):
+                        content = message.get('content')
+                    # If content is a list of segments (OpenAI Responses-style), join text parts
+                    if isinstance(content, list):
+                        try:
+                            # Prefer explicit 'output_text' segments when present
+                            has_output = any(isinstance(seg, dict) and seg.get('type') == 'output_text' for seg in content)
+                            segments = []
+                            for seg in content:
+                                if isinstance(seg, dict):
+                                    if has_output and seg.get('type') != 'output_text':
+                                        continue
+                                    txt = seg.get('text') or seg.get('content') or seg.get('value')
+                                    if isinstance(txt, str) and txt:
+                                        segments.append(txt)
+                                elif isinstance(seg, str):
+                                    if not has_output and seg:
+                                        segments.append(seg)
+                            content = "\n".join(segments).strip()
+                        except Exception:
+                            # Fall through to other extraction paths
+                            pass
+                    # Fallback: some routers may place text at the choice level
+                    if not content:
+                        content = getattr(choice0, 'text', None) if hasattr(choice0, 'text') else (
+                            choice0.get('text') if isinstance(choice0, dict) else None
+                        )
+                    # Final fallback: attempt to flatten any nested message/content structures
+                    if not content:
+                        try:
+                            as_dict = None
+                            if hasattr(completion, 'model_dump'):
+                                as_dict = completion.model_dump()
+                            elif hasattr(completion, 'dict'):
+                                as_dict = completion.dict()
+                            elif isinstance(completion, dict):
+                                as_dict = completion
+                            if isinstance(as_dict, dict):
+                                choices = as_dict.get('choices') or []
+                                if choices:
+                                    m = choices[0].get('message') if isinstance(choices[0], dict) else None
+                                    cont = None
+                                    if isinstance(m, dict):
+                                        cont = m.get('content')
+                                    if isinstance(cont, list):
+                                        parts = []
+                                        for seg in cont:
+                                            txt = None
+                                            if isinstance(seg, dict):
+                                                txt = seg.get('text') or seg.get('content') or seg.get('value')
+                                            elif isinstance(seg, str):
+                                                txt = seg
+                                            if isinstance(txt, str) and txt:
+                                                parts.append(txt)
+                                        content = "\n".join(parts).strip()
+                                    elif isinstance(cont, str):
+                                        content = cont
+                        except Exception:
+                            pass
+            except Exception:
+                content = None
+            text_out = content or ''
+            text_out = _strip_think_blocks(text_out)
+            logging.getLogger(__name__).debug(
+                f"HuggingFace success: model='{hf_model}', provider='{provider}', reply_len={len(text_out)}"
+            )
+            return text_out + f"\n\n[model: {hf_model}:{provider}]"
+        except Exception:
+            logging.getLogger(__name__).exception(
+                f"HuggingFace call failed for model='{model}'"
+            )
+            if not ALLOW_FALLBACKS:
+                return f"Error calling Hugging Face model '{model}'.\n\n[model: {model}]"
+            # Fallback to OpenAI on error only if allowed
+            final_messages = []
+            if effective_system:
+                final_messages.append({"role": "system", "content": effective_system})
+            final_messages.extend(messages)
+            if not openai_client:
+                 return "OpenAI client not initialized."
+            response = openai_client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=final_messages,
+                max_tokens=max_tokens,
+                temperature=0.3,
+            )
+            return (response.choices[0].message.content or "") + "\n\n[model: gpt-3.5-turbo]"
+
+    else:
+        # Default OpenAI
+        final_messages = []
+        if system_prompt:
+            final_messages.append({"role": "system", "content": system_prompt})
+        final_messages.extend(messages)
+        if not openai_client:
+             return "OpenAI client not initialized."
+        response = openai_client.chat.completions.create(
+            model=model or "gpt-3.5-turbo",
+            messages=final_messages,
+            max_tokens=max_tokens,
+            temperature=0.3,
+        )
+        out = response.choices[0].message.content or ""
+        out = _strip_think_blocks(out)
+        return (out + f"\n\n[model: {model or 'gpt-3.5-turbo'}]")
 
 def summarize_text(text, target_words=None, max_tokens=500, preset=None, model=None):
     """Summarize text using selected model/provider with optional preset formatting."""
@@ -670,6 +755,11 @@ def translate_text_free(text, target_language_code, source_language_code='auto')
 def chat_with_openai(messages, system_prompt=None, model="gpt-3.5-turbo", max_tokens=800):
     """Generic chat helper using OpenAI ChatCompletion. Library uses this and must stay OpenAI."""
     try:
+        import openai
+        openai_client = None
+        if OPENAI_KEY:
+            openai_client = openai.OpenAI(api_key=OPENAI_KEY)
+            
         final_messages = []
         if system_prompt:
             final_messages.append({"role": "system", "content": system_prompt})
@@ -782,11 +872,3 @@ def recommend_youtube_videos_web(query, max_results=5, timeout=15, region=None):
             ch = r['channel'] or 'YouTube'
             lines.append(f"- {t} — {ch}\n  {r['url']}")
         return "\n".join(lines)
-
-    # Compose reply
-    lines = ["Here are current YouTube picks for your topic:", ""]
-    for i, r in enumerate(results, 1):
-        t = r['title'] or f"Video {i}"
-        ch = r['channel'] or 'YouTube'
-        lines.append(f"- {t} — {ch}\n  {r['url']}")
-    return "\n".join(lines)
