@@ -52,7 +52,10 @@ def extract_text_from_image(file_path):
         tesseract_cmd = os.environ.get('TESSERACT_CMD') or getattr(settings, 'TESSERACT_CMD', None)
         if tesseract_cmd:
             # Only set if the path actually exists to avoid breaking Render with local Windows paths
-            if os.path.exists(tesseract_cmd):
+            # Special case: if it's just 'tesseract', assume it's in PATH and don't check existence
+            if tesseract_cmd.lower() == 'tesseract':
+                 pass 
+            elif os.path.exists(tesseract_cmd):
                 pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
             else:
                 logging.getLogger(__name__).warning(
@@ -160,12 +163,11 @@ def _route_chat(messages, system_prompt=None, model="gpt-3.5-turbo", max_tokens=
             if not ALLOW_FALLBACKS:
                 return f"Provider not configured for model '{model}'. Set ANTHROPIC_API_KEY to use this model.\n\n[model: {model}]"
             # Fallback to OpenAI
-            pass # Will fall through to OpenAI logic if we structure this right, or we duplicate fallback logic.
-                 # For now, let's duplicate the fallback logic for safety as per original code.
             final_messages = []
             if system_prompt:
                 final_messages.append({"role": "system", "content": system_prompt})
-            final_messages.extend(messages)
+            # Filter out system messages from history to avoid duplicates
+            final_messages.extend([m for m in messages if m.get('role') != 'system'])
             if not openai_client:
                  return "OpenAI client not initialized."
             response = openai_client.chat.completions.create(
@@ -213,7 +215,8 @@ def _route_chat(messages, system_prompt=None, model="gpt-3.5-turbo", max_tokens=
             final_messages = []
             if system_prompt:
                 final_messages.append({"role": "system", "content": system_prompt})
-            final_messages.extend(messages)
+            # Filter out system messages from history to avoid duplicates
+            final_messages.extend([m for m in messages if m.get('role') != 'system'])
             if not openai_client:
                  return "OpenAI client not initialized."
             response = openai_client.chat.completions.create(
@@ -295,7 +298,8 @@ def _route_chat(messages, system_prompt=None, model="gpt-3.5-turbo", max_tokens=
             final_messages = []
             if effective_system:
                 final_messages.append({"role": "system", "content": effective_system})
-            final_messages.extend(messages)
+            # Filter out system messages from history to avoid duplicates
+            final_messages.extend([m for m in messages if m.get('role') != 'system'])
             if not openai_client:
                  return "OpenAI client not initialized."
             response = openai_client.chat.completions.create(
@@ -310,7 +314,8 @@ def _route_chat(messages, system_prompt=None, model="gpt-3.5-turbo", max_tokens=
         final_messages = []
         if effective_system:
             final_messages.append({"role": "system", "content": effective_system})
-        final_messages.extend(messages)
+        # Filter out system messages from history to avoid duplicates
+        final_messages.extend([m for m in messages if m.get('role') != 'system'])
         try:
             # Normalize model/provider for Inference Providers router
             raw_model = (model or '').strip()
@@ -465,7 +470,8 @@ def _route_chat(messages, system_prompt=None, model="gpt-3.5-turbo", max_tokens=
             final_messages = []
             if effective_system:
                 final_messages.append({"role": "system", "content": effective_system})
-            final_messages.extend(messages)
+            # Filter out system messages from history to avoid duplicates
+            final_messages.extend([m for m in messages if m.get('role') != 'system'])
             if not openai_client:
                  return "OpenAI client not initialized."
             response = openai_client.chat.completions.create(
@@ -481,7 +487,8 @@ def _route_chat(messages, system_prompt=None, model="gpt-3.5-turbo", max_tokens=
         final_messages = []
         if system_prompt:
             final_messages.append({"role": "system", "content": system_prompt})
-        final_messages.extend(messages)
+        # Filter out system messages from history to avoid duplicates
+        final_messages.extend([m for m in messages if m.get('role') != 'system'])
         if not openai_client:
              return "OpenAI client not initialized."
         response = openai_client.chat.completions.create(
