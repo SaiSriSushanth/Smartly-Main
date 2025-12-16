@@ -14,10 +14,8 @@ else
 fi
 
 echo "Starting Celery worker..."
-celery -A smartly worker -l info &
-
-# Wait a moment to ensure Celery starts
-sleep 5
+celery -A smartly worker -l info &    # Wait a moment to ensure Celery starts
+    # sleep 5
 
 # Execute the passed command (e.g., from Render settings) or default to gunicorn
 if [ "$#" -gt 0 ]; then

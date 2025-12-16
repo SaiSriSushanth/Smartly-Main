@@ -38,7 +38,8 @@ RUN chmod +x /app/entrypoint.sh
 ENTRYPOINT ["/app/entrypoint.sh"]
 
 # Default command (passed to entrypoint)
-CMD ["gunicorn", "smartly.wsgi:application"]
+# CMD ["gunicorn", "smartly.wsgi:application"]
+
 
 
 
