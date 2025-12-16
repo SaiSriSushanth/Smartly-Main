@@ -14,8 +14,11 @@ else
 fi
 
 echo "Starting Celery worker..."
-celery -A smartly worker -l info &    # Wait a moment to ensure Celery starts
-    # sleep 5
+# Limit concurrency to 1 to save memory on free tier
+celery -A smartly worker -l info --concurrency 1 &
+
+# Wait a moment to ensure Celery starts
+sleep 5
 
 # Execute the passed command (e.g., from Render settings) or default to gunicorn
 if [ "$#" -gt 0 ]; then
@@ -23,5 +26,6 @@ if [ "$#" -gt 0 ]; then
     exec "$@"
 else
     echo "Starting default Gunicorn..."
-    exec gunicorn --bind 0.0.0.0:${PORT:-8000} smartly.wsgi:application
+    # Limit workers to 2 to save memory
+    exec gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 2 smartly.wsgi:application
 fi
