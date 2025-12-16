@@ -1,14 +1,9 @@
 from django.shortcuts import render, redirect, get_object_or_404
 from django.http import HttpResponse, JsonResponse
 from io import BytesIO
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, ListFlowable, ListItem, Preformatted
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib import colors
+# ReportLab imports moved to functions to save memory
 import re
+
 from django.urls import reverse
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
@@ -898,6 +893,9 @@ def youtube_watch_chat(request):
         'chat_messages': chat_messages,
     })
 def _draw_header_footer(canvas, doc, branding="Smartly", footer_text=""):
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+    
     canvas.saveState()
     width, height = letter
     canvas.setFont('Helvetica-Bold', 10)
@@ -909,6 +907,10 @@ def _draw_header_footer(canvas, doc, branding="Smartly", footer_text=""):
     canvas.restoreState()
 
 def _build_styles():
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name='CoverBrand', fontSize=18, leading=22, alignment=TA_CENTER, textColor=colors.HexColor('#2c3e50')))
     styles.add(ParagraphStyle(name='CoverTitle', fontSize=24, leading=28, alignment=TA_CENTER))
@@ -922,7 +924,11 @@ def _build_styles():
     styles.add(ParagraphStyle(name='CodeBlock', fontName='Courier', fontSize=9, leading=12, backColor=colors.whitesmoke))
     return styles
 
+
 def _markdown_to_story(text, styles):
+    from reportlab.platypus import Paragraph, Spacer, ListFlowable, ListItem, Preformatted
+    from reportlab.lib.units import inch
+
     story = []
     lines = text.splitlines()
     in_code = False
@@ -980,8 +986,13 @@ def _markdown_to_story(text, styles):
     if in_code and code_lines:
         story.append(Preformatted('\n'.join(code_lines), styles['CodeBlock']))
     return story
+
 def download_result_pdf(request, result_id):
     """Download a processed document result as PDF"""
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+
     pr = get_object_or_404(ProcessedResult, id=result_id)
     document = pr.document
     buffer = BytesIO()
@@ -1015,8 +1026,13 @@ def download_result_pdf(request, result_id):
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     return response
 
+
 def download_youtube_result_pdf(request, result_id):
     """Download a YouTube processed result as PDF"""
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+
     yt_pr = get_object_or_404(YouTubeProcessedResult, id=result_id)
     youtube_video = yt_pr.youtube_video
     buffer = BytesIO()
@@ -1048,6 +1064,7 @@ def download_youtube_result_pdf(request, result_id):
     filename = f"{base}_{yt_pr.processing_type}.pdf"
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     return response
+
 
 @login_required
 def chat_view(request):

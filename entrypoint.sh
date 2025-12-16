@@ -26,6 +26,7 @@ if [ "$#" -gt 0 ]; then
     exec "$@"
 else
     echo "Starting default Gunicorn..."
-    # Limit workers to 2 to save memory
-    exec gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 2 smartly.wsgi:application
+    # Limit workers to 1 to save memory (critical for free tier)
+    # Increase timeout to 120s to prevent startup kills
+    exec gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 120 smartly.wsgi:application
 fi
