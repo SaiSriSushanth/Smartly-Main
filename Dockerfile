@@ -30,5 +30,10 @@ RUN python manage.py collectstatic --noinput
 # Expose port
 EXPOSE 8000
 
-# Run gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "smartly.wsgi:application"]
+# Copy entrypoint script and make it executable
+COPY entrypoint.sh /app/
+RUN chmod +x /app/entrypoint.sh
+
+# Run entrypoint script
+ENTRYPOINT ["/app/entrypoint.sh"]
+
